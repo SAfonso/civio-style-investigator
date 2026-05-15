@@ -1,8 +1,8 @@
 import json
 import logging
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from tools.utils.http import _fetch
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +37,14 @@ def search_datasets(query: str, max_results: int = 5) -> list[dict]:
     })
     request_url = f"{_BASE_URL}?{params}"
 
+    raw = _fetch(request_url)
+    if raw is None:
+        return []
+
     try:
-        with urllib.request.urlopen(request_url, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logger.error("datos.gob.es devolvió HTTP %s para query '%s'", e.code, query)
-        return []
-    except urllib.error.URLError as e:
-        logger.error("No se pudo conectar con datos.gob.es: %s", e.reason)
-        return []
+        data = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as e:
         logger.error("Respuesta de datos.gob.es no es JSON válido: %s", e)
-        return []
-    except Exception as e:
-        logger.error("Error inesperado al llamar a datos.gob.es: %s", e)
         return []
 
     items = data.get("result", {}).get("items", [])

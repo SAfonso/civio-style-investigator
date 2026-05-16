@@ -2,10 +2,12 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from tools.cross_reference import cross_reference
@@ -19,8 +21,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
-_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 _MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "1000"))
+_REQUEST_DELAY = int(os.getenv("GEMINI_REQUEST_DELAY", "0"))
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "system.md").read_text(encoding="utf-8")
 
@@ -195,6 +198,35 @@ def _auto_report(question: str, summary: str, consulted_urls: list[str], limitat
     return result.get("path", "")
 
 
+def _generate_with_retry(client, contents, config, max_retries: int = 2):
+    """Llama a generate_content con reintentos automáticos ante error 429.
+
+    Espera 60 segundos entre reintentos. Lanza la excepción original si se
+    agotan los reintentos o si el error no es un rate limit (código 429).
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return client.models.generate_content(
+                model=_MODEL, contents=contents, config=config
+            )
+        except genai_errors.ClientError as e:
+            is_rate_limit = getattr(e, "code", None) == 429 or "429" in str(e)
+            if is_rate_limit and attempt < max_retries:
+                logger.warning(
+                    "Rate limit alcanzado — esperando 60s antes de reintentar "
+                    "(intento %d/%d)",
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(60)
+            else:
+                if is_rate_limit:
+                    logger.error(
+                        "Rate limit alcanzado — abortando tras %d reintentos", max_retries
+                    )
+                raise
+
+
 def run(question: str) -> dict:
     """
     Ejecuta el loop principal del agente investigador (ciclo ReAct).
@@ -204,16 +236,26 @@ def run(question: str) -> dict:
     con texto puro o se agoten las iteraciones permitidas. En los dos últimos
     casos genera automáticamente un informe con los datos recopilados.
 
+    Los errores 429 (rate limit) se reintentan hasta 2 veces con una espera
+    de 60 segundos. Si se agotan los reintentos, se genera un informe de
+    abort y se devuelve con status "rate_limit_abort".
+
     Args:
         question: Pregunta de investigación en lenguaje natural.
 
     Returns:
         Dict con las claves:
-          - status (str):  "completed" | "text_response" | "max_iterations_reached"
+          - status (str):     "completed" | "text_response" |
+                              "max_iterations_reached" | "rate_limit_abort"
           - iterations (int): número de iteraciones consumidas
-          - path (str):    ruta del informe generado (siempre presente)
+          - path (str):       ruta del informe generado (siempre presente)
     """
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    config = genai.types.GenerateContentConfig(
+        system_instruction=_SYSTEM_PROMPT,
+        tools=[_TOOLS],
+        max_output_tokens=_MAX_TOKENS,
+    )
     messages = [types.Content(role="user", parts=[types.Part(text=question)])]
     report_path = None
     write_report_called = False
@@ -222,15 +264,21 @@ def run(question: str) -> dict:
     for iteration in range(_MAX_ITERATIONS):
         logger.info("Iteración %d/%d", iteration + 1, _MAX_ITERATIONS)
 
-        response = client.models.generate_content(
-            model=_MODEL,
-            contents=messages,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                tools=[_TOOLS],
-                max_output_tokens=_MAX_TOKENS,
-            ),
-        )
+        try:
+            response = _generate_with_retry(client, messages, config)
+        except genai_errors.ClientError as e:
+            logger.error("Error de API de Gemini — abortando investigación: %s", e)
+            report_path = _auto_report(
+                question=question,
+                summary="La investigación fue interrumpida por un error de la API de Gemini.",
+                consulted_urls=consulted_urls,
+                limitation=f"Error de API (rate limit o conexión) tras reintentos: {e}",
+            )
+            return {
+                "status": "rate_limit_abort",
+                "path": report_path,
+                "iterations": iteration + 1,
+            }
 
         if not response.candidates:
             logger.error("La API de Gemini devolvió una respuesta sin candidatos")
@@ -297,6 +345,10 @@ def run(question: str) -> dict:
                 "Informe generado en iteración %d: %s", iteration + 1, report_path
             )
             break
+
+        if _REQUEST_DELAY > 0:
+            logger.info("Esperando %ds para respetar rate limit...", _REQUEST_DELAY)
+            time.sleep(_REQUEST_DELAY)
 
     else:
         logger.warning(

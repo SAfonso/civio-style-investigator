@@ -4,9 +4,18 @@ An autonomous agent that investigates questions about Spanish public data and pr
 
 ---
 
+## Current status
+
+- **Working** — runs end-to-end with Gemini 2.5 Flash-Lite (free tier)
+- **Data sources implemented:** datos.gob.es open catalogue + BOE daily summary (last 3 days)
+- **Rate limiting handled** — configurable delay between calls (`GEMINI_REQUEST_DELAY`) and automatic retry with 60s backoff on 429 errors
+- **Always produces a report** — even when the agent finds no data or hits the iteration limit, a Markdown report is generated with the limitation explained
+
+---
+
 ## About this project
 
-This is a learning project built to understand the **ReAct pattern** (Reason → Act → Observe) and how to build tool-using agents with the Anthropic API.
+This is a learning project built to understand the **ReAct pattern** (Reason → Act → Observe) and how to build tool-using agents with the Gemini API.
 
 It is inspired by the investigative workflow of [CIVIO](https://civio.es), the Spanish data-journalism nonprofit, which routinely combines datos.gob.es, the BOE, and other public sources to hold institutions accountable.
 
@@ -23,14 +32,14 @@ User question
       │
       ▼
  ┌─────────────┐
- │   Reason    │  Claude decides what to do next
+ │   Reason    │  The model decides what to do next
  └──────┬──────┘
-        │ tool_use
+        │ function_call
         ▼
  ┌─────────────┐
  │     Act     │  Execute the chosen tool
  └──────┬──────┘
-        │ tool_result
+        │ function_response
         ▼
  ┌─────────────┐
  │   Observe   │  Result added to context
@@ -41,17 +50,17 @@ User question
         └── done? → write_report → Markdown file saved
 ```
 
-The loop stops when the agent calls `write_report` (investigation complete) or when `MAX_ITERATIONS` is reached (safety limit).
+The loop stops when the agent calls `write_report` (investigation complete), responds with plain text (no data found), or when `MAX_ITERATIONS` is reached. In all three cases a report is generated.
 
 ---
 
 ## Data sources
 
-| Source | What it provides |
-|---|---|
-| [datos.gob.es](https://datos.gob.es) | Spanish open data catalogue — spending, demographics, contracts, environment, and more |
-| [BOE](https://boe.es) | Official State Gazette — legislation, regulations, and official dispositions |
-| Any public URL | `fetch_document` downloads and extracts text from any HTML, XML, or JSON endpoint |
+| Source | What it provides | How it's searched |
+|---|---|---|
+| [datos.gob.es](https://datos.gob.es) | Spanish open data catalogue — spending, demographics, contracts, environment | By title and keyword, per significant word in the query |
+| [BOE](https://boe.es) | Official State Gazette — legislation, regulations, official dispositions | Daily summary for the last 3 days, filtered by keyword in title |
+| Any public URL | Raw content from any endpoint | `fetch_document` downloads and parses HTML, XML, or JSON |
 
 ---
 
@@ -64,7 +73,7 @@ cd civio-style-investigator
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY
+# Edit .env and add your GEMINI_API_KEY
 ```
 
 ---
@@ -95,7 +104,7 @@ civio-style-investigator/
 │   └── system.md             # System prompt that defines the agent's behaviour
 ├── tools/
 │   ├── search_datasets.py    # Search the datos.gob.es open data catalogue
-│   ├── search_boe.py         # Search and fetch documents from the BOE
+│   ├── search_boe.py         # Search BOE daily summary by keyword
 │   ├── fetch_document.py     # Download any public URL (HTML, XML, JSON)
 │   ├── cross_reference.py    # LLM-powered cross-analysis of two sources
 │   ├── write_report.py       # Generate and save the final Markdown report
@@ -132,17 +141,47 @@ All settings are read from `.env` at startup. Copy `.env.example` and fill in yo
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Your Anthropic API key (required) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Claude model used for reasoning and cross-referencing |
-| `ANTHROPIC_MAX_TOKENS` | `1000` | Max tokens per API response |
+| `GEMINI_API_KEY` | — | Your Gemini API key (required) |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Model used for reasoning and cross-referencing |
+| `GEMINI_MAX_TOKENS` | `1000` | Max tokens per API response |
+| `GEMINI_REQUEST_DELAY` | `12` | Seconds to wait between API calls (free tier rate limiting) |
 | `MAX_ITERATIONS` | `10` | Safety limit on ReAct loop iterations |
 | `MAX_TOKENS_PER_TOOL` | `5000` | Max characters returned by each tool (fetch, BOE) |
 
 ---
 
+## Known limitations
+
+- **search_boe** — only searches dispositions from the last 3 days. The BOE does not offer full-text search over its historical archive via its open data API.
+- **search_datasets** — searches by keyword in dataset titles, not full-text across dataset contents. Queries are split into significant words (stopwords filtered) and searched individually.
+- **No session memory** — each run starts from scratch. Results are not cached between executions.
+- **Gemini free tier** — Flash-Lite allows 15 RPM. The default 12-second delay between calls keeps usage within limits; adjust `GEMINI_REQUEST_DELAY` if you have a paid plan.
+
+---
+
+## Lessons learned
+
+These are the non-obvious things discovered while building this, documented so the next person doesn't have to rediscover them.
+
+**datos.gob.es has no free-text search.** The API uses semantic path routes: `/dataset/title/{query}`, `/dataset/keyword/{query}`, `/dataset/theme/{id}`, etc. A `?q=` parameter does not exist. Multi-word queries need to be split and searched per word.
+
+**The BOE open data API has no historical full-text search.** The `/legislacion-consolidada` endpoint supports structured queries but not keyword search across the full archive. The daily summary (`/boe/sumario/YYYYMMDD`) is the most reliable endpoint — it returns all dispositions published on a given day and can be filtered locally by keyword in the title.
+
+**Read the API docs before writing code.** Both of the above cost significant refactoring time. The correct endpoint structure was only found by reading the official open data documentation, not by guessing from parameter names or trying common REST conventions.
+
+**LLM provider swaps are cheap if the abstraction is right.** Migrating from Anthropic Claude to Gemini required changes in exactly two files: `agent.py` (tool call format, message history format, client initialization) and `tools/cross_reference.py` (the only tool that calls an LLM directly). All other tools — search, fetch, write — are pure Python and are completely provider-agnostic.
+
+**The agent's intelligence is bounded by its toolset.** The ReAct loop itself is simple; the quality of the investigation depends entirely on what tools are available and how well they cover the question's domain. Adding a new source (e.g. INE) improves results without touching the loop logic.
+
+---
+
 ## Roadmap
 
-- **More data sources** — INE (National Statistics Institute), municipal transparency portals, Contratación del Estado
-- **Session memory** — SQLite cache so repeated queries don't re-fetch the same documents
-- **Simple web UI** — a minimal interface to submit queries and browse reports without touching the terminal
-- **search_boe: actualmente busca solo en los últimos 3 días** — pendiente: integrar el buscador histórico del BOE o usar su endpoint SPARQL cuando esté disponible
+**v2 — More data sources**
+- `search_ine()` — INE has a documented REST API for demographic and economic statistics
+- `search_hacienda()` — MINHACIENDA transparency portal for public spending data
+- BOE historical search via SPARQL endpoint (when available)
+
+**v3 — Memory and UX**
+- Session memory with SQLite to cache results and avoid re-fetching the same documents
+- Simple web UI to submit queries and browse reports without a terminal

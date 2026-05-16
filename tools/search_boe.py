@@ -1,4 +1,5 @@
 import logging
+import os
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -86,7 +87,7 @@ def get_boe_document(boe_id: str) -> dict:
         Dict con las claves:
           - id (str):    identificador BOE
           - title (str): título de la norma
-          - text (str):  texto completo truncado a 5000 caracteres
+          - text (str):  texto completo truncado según MAX_TOKENS_PER_TOOL
           - url (str):   URL canónica del documento
 
         Devuelve dict con valores vacíos si la descarga o el parseo fallan.
@@ -115,8 +116,9 @@ def get_boe_document(boe_id: str) -> dict:
         parts = [el.text.strip() for el in root.iter() if el.text and el.text.strip()]
         full_text = " ".join(parts)
 
-    if len(full_text) > 5000:
-        full_text = full_text[:4997] + "..."
+    max_chars = int(os.getenv("MAX_TOKENS_PER_TOOL", "5000"))
+    if len(full_text) > max_chars:
+        full_text = full_text[:max_chars - 3] + "..."
 
     return {
         "id": boe_id,

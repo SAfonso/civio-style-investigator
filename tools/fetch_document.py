@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
@@ -7,7 +8,9 @@ from tools.utils.http import _fetch_with_headers
 
 logger = logging.getLogger(__name__)
 
-_MAX_CHARS = 5000
+
+def _max_chars() -> int:
+    return int(os.getenv("MAX_TOKENS_PER_TOOL", "5000"))
 
 
 def fetch_document(url: str) -> dict:
@@ -39,10 +42,11 @@ def fetch_document(url: str) -> dict:
     raw, content_type_header = result
     mime = content_type_header.split(";")[0].strip().lower()
 
+    max_chars = _max_chars()
     text = _extract_text(raw, mime)
-    truncated = len(text) > _MAX_CHARS
+    truncated = len(text) > max_chars
     if truncated:
-        text = text[:_MAX_CHARS]
+        text = text[:max_chars]
 
     return {
         "url": url,

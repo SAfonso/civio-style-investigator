@@ -2,8 +2,8 @@ import json
 import logging
 import os
 
-import anthropic
 from dotenv import load_dotenv
+from google import genai
 
 load_dotenv()
 
@@ -18,13 +18,13 @@ _SYSTEM_PROMPT = (
     "Sé directo y cita datos específicos. Nunca inventes información."
 )
 
-_client: anthropic.Anthropic | None = None
+_client: genai.Client | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> genai.Client:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic()
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     return _client
 
 
@@ -40,7 +40,7 @@ def cross_reference(
     Cruza dos fuentes de datos usando el LLM para encontrar conexiones,
     contradicciones o relaciones relevantes en el contexto de una pregunta.
 
-    Esta tool usa Claude internamente como motor de análisis: no aplica reglas
+    Esta tool usa Gemini internamente como motor de análisis: no aplica reglas
     heurísticas ni comparaciones de texto, sino que razona sobre el contenido
     semántico de ambas fuentes. Los textos se truncan a 3000 caracteres cada
     uno antes de enviarse al modelo.
@@ -51,8 +51,8 @@ def cross_reference(
         text_b:   Contenido extraído de la segunda fuente.
         source_b: Nombre descriptivo de la segunda fuente (ej: "datos.gob.es").
         question: La pregunta original del usuario que motiva la investigación.
-        model:    Override puntual del modelo. Si es None se usa ANTHROPIC_MODEL
-                  del entorno (o "claude-sonnet-4-20250514" como fallback).
+        model:    Override puntual del modelo. Si es None se usa GEMINI_MODEL
+                  del entorno (o "gemini-2.5-flash" como fallback).
 
     Returns:
         Dict con las claves:
@@ -65,8 +65,8 @@ def cross_reference(
           - raw_response (str):   respuesta completa del LLM sin procesar
         En caso de error de API devuelve el mismo dict con campos vacíos.
     """
-    _model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-    _max_tokens = int(os.getenv("ANTHROPIC_MAX_TOKENS", "1000"))
+    _model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    _max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1000"))
 
     empty = {
         "question": question,
@@ -97,23 +97,19 @@ def cross_reference(
     )
 
     try:
-        response = _get_client().messages.create(
+        response = _get_client().models.generate_content(
             model=_model,
-            max_tokens=_max_tokens,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                max_output_tokens=_max_tokens,
+            ),
         )
-    except anthropic.APIStatusError as e:
-        logger.error("Error HTTP %s de la API de Anthropic: %s", e.status_code, e.message)
-        return empty
-    except anthropic.APIConnectionError as e:
-        logger.error("No se pudo conectar con la API de Anthropic: %s", e)
-        return empty
     except Exception as e:
-        logger.error("Error inesperado al llamar a la API de Anthropic: %s", e)
+        logger.error("Error al llamar a la API de Gemini: %s", e)
         return empty
 
-    raw = next((b.text for b in response.content if b.type == "text"), "")
+    raw = response.text or ""
     parsed = _parse_llm_json(raw)
 
     return {

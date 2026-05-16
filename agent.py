@@ -4,8 +4,9 @@ import os
 import sys
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 from tools.cross_reference import cross_reference
 from tools.fetch_document import fetch_document
@@ -18,140 +19,139 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
-_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "1000"))
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "1000"))
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "system.md").read_text(encoding="utf-8")
 
-_TOOLS = [
-    {
-        "name": "search_datasets",
-        "description": "Busca conjuntos de datos públicos en el catálogo datos.gob.es.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Términos de búsqueda en español.",
+_TOOLS = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="search_datasets",
+            description="Busca conjuntos de datos públicos en el catálogo datos.gob.es.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "query": types.Schema(
+                        type="STRING",
+                        description="Términos de búsqueda en español.",
+                    ),
+                    "max_results": types.Schema(
+                        type="INTEGER",
+                        description="Número máximo de resultados. Por defecto 5.",
+                    ),
                 },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Número máximo de resultados. Por defecto 5.",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_boe",
-        "description": "Busca normas en la legislación consolidada del BOE (Boletín Oficial del Estado).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Términos de búsqueda en español.",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Número máximo de resultados. Por defecto 5.",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "fetch_document",
-        "description": "Descarga y extrae el contenido legible de una URL pública (HTML, XML o JSON).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "URL pública a descargar.",
-                },
-            },
-            "required": ["url"],
-        },
-    },
-    {
-        "name": "cross_reference",
-        "description": (
-            "Cruza dos fuentes de datos para encontrar conexiones, contradicciones "
-            "o relaciones relevantes entre ellas en el contexto de la pregunta."
+                required=["query"],
+            ),
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text_a": {
-                    "type": "string",
-                    "description": "Contenido extraído de la primera fuente.",
+        types.FunctionDeclaration(
+            name="search_boe",
+            description="Busca normas en la legislación consolidada del BOE (Boletín Oficial del Estado).",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "query": types.Schema(
+                        type="STRING",
+                        description="Términos de búsqueda en español.",
+                    ),
+                    "max_results": types.Schema(
+                        type="INTEGER",
+                        description="Número máximo de resultados. Por defecto 5.",
+                    ),
                 },
-                "source_a": {
-                    "type": "string",
-                    "description": "Nombre descriptivo de la primera fuente.",
-                },
-                "text_b": {
-                    "type": "string",
-                    "description": "Contenido extraído de la segunda fuente.",
-                },
-                "source_b": {
-                    "type": "string",
-                    "description": "Nombre descriptivo de la segunda fuente.",
-                },
-                "question": {
-                    "type": "string",
-                    "description": "La pregunta original del usuario que motiva la investigación.",
-                },
-            },
-            "required": ["text_a", "source_a", "text_b", "source_b", "question"],
-        },
-    },
-    {
-        "name": "write_report",
-        "description": (
-            "Genera y guarda el informe final de la investigación. "
-            "Llamar solo cuando la investigación esté completa."
+                required=["query"],
+            ),
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "findings": {
-                    "type": "object",
-                    "description": "Resultado completo de la investigación.",
-                    "properties": {
-                        "question": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "findings": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "fact": {"type": "string"},
-                                    "source": {"type": "string"},
-                                    "url": {"type": "string"},
-                                },
-                                "required": ["fact", "source"],
-                            },
-                        },
-                        "limitations": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "sources": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                    },
-                    "required": ["question", "summary", "findings", "limitations", "sources"],
+        types.FunctionDeclaration(
+            name="fetch_document",
+            description="Descarga y extrae el contenido legible de una URL pública (HTML, XML o JSON).",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "url": types.Schema(
+                        type="STRING",
+                        description="URL pública a descargar.",
+                    ),
                 },
-            },
-            "required": ["findings"],
-        },
-    },
-]
+                required=["url"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="cross_reference",
+            description=(
+                "Cruza dos fuentes de datos para encontrar conexiones, contradicciones "
+                "o relaciones relevantes entre ellas en el contexto de la pregunta."
+            ),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "text_a": types.Schema(
+                        type="STRING",
+                        description="Contenido extraído de la primera fuente.",
+                    ),
+                    "source_a": types.Schema(
+                        type="STRING",
+                        description="Nombre descriptivo de la primera fuente.",
+                    ),
+                    "text_b": types.Schema(
+                        type="STRING",
+                        description="Contenido extraído de la segunda fuente.",
+                    ),
+                    "source_b": types.Schema(
+                        type="STRING",
+                        description="Nombre descriptivo de la segunda fuente.",
+                    ),
+                    "question": types.Schema(
+                        type="STRING",
+                        description="La pregunta original del usuario que motiva la investigación.",
+                    ),
+                },
+                required=["text_a", "source_a", "text_b", "source_b", "question"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="write_report",
+            description=(
+                "Genera y guarda el informe final de la investigación. "
+                "Llamar solo cuando la investigación esté completa."
+            ),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "findings": types.Schema(
+                        type="OBJECT",
+                        description="Resultado completo de la investigación.",
+                        properties={
+                            "question": types.Schema(type="STRING"),
+                            "summary": types.Schema(type="STRING"),
+                            "findings": types.Schema(
+                                type="ARRAY",
+                                items=types.Schema(
+                                    type="OBJECT",
+                                    properties={
+                                        "fact": types.Schema(type="STRING"),
+                                        "source": types.Schema(type="STRING"),
+                                        "url": types.Schema(type="STRING"),
+                                    },
+                                ),
+                            ),
+                            "limitations": types.Schema(
+                                type="ARRAY",
+                                items=types.Schema(type="STRING"),
+                            ),
+                            "sources": types.Schema(
+                                type="ARRAY",
+                                items=types.Schema(type="STRING"),
+                            ),
+                        },
+                        required=["question", "summary", "findings", "limitations", "sources"],
+                    ),
+                },
+                required=["findings"],
+            ),
+        ),
+    ]
+)
 
 
 def _dispatch_tool(name: str, inputs: dict):
@@ -182,56 +182,70 @@ def run(question: str) -> dict:
 
     Returns:
         Dict con las claves:
-          - status (str):     "completed" | "max_iterations_reached"
-          - iterations (int): número de iteraciones consumidas
+          - status (str):      "completed" | "max_iterations_reached"
+          - iterations (int):  número de iteraciones consumidas
           - path (str | None): ruta del informe generado, o None si no se generó
     """
-    client = anthropic.Anthropic()
-    messages = [{"role": "user", "content": question}]
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    messages = [types.Content(role="user", parts=[types.Part(text=question)])]
     report_path = None
     write_report_called = False
 
     for iteration in range(_MAX_ITERATIONS):
         logger.info("Iteración %d/%d", iteration + 1, _MAX_ITERATIONS)
 
-        response = client.messages.create(
+        response = client.models.generate_content(
             model=_MODEL,
-            max_tokens=_MAX_TOKENS,
-            system=_SYSTEM_PROMPT,
-            tools=_TOOLS,
-            messages=messages,
+            contents=messages,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                tools=[_TOOLS],
+                max_output_tokens=_MAX_TOKENS,
+            ),
         )
 
-        messages.append({"role": "assistant", "content": response.content})
-
-        if response.stop_reason != "tool_use":
-            logger.info("Agente terminó sin tool_use en iteración %d", iteration + 1)
+        if not response.candidates:
+            logger.error("La API de Gemini devolvió una respuesta sin candidatos")
             break
 
-        tool_results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        model_content = response.candidates[0].content
+        messages.append(model_content)
+
+        function_call_parts = [
+            part for part in model_content.parts if part.function_call
+        ]
+
+        if not function_call_parts:
+            logger.info("Agente terminó sin function_call en iteración %d", iteration + 1)
+            break
+
+        response_parts = []
+        for part in function_call_parts:
+            tool_name = part.function_call.name
+            tool_args = dict(part.function_call.args)
 
             logger.info(
                 "Tool: %s | params: %s",
-                block.name,
-                json.dumps(block.input, ensure_ascii=False)[:200],
+                tool_name,
+                json.dumps(tool_args, ensure_ascii=False, default=str)[:200],
             )
 
-            result = _dispatch_tool(block.name, block.input)
+            result = _dispatch_tool(tool_name, tool_args)
 
-            if block.name == "write_report":
+            if tool_name == "write_report":
                 write_report_called = True
                 report_path = result.get("path")
 
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
+            response_parts.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        name=tool_name,
+                        response={"result": result},
+                    )
+                )
+            )
 
-        messages.append({"role": "user", "content": tool_results})
+        messages.append(types.Content(role="tool", parts=response_parts))
 
         if write_report_called:
             logger.info(

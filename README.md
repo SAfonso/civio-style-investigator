@@ -145,3 +145,4 @@ All settings are read from `.env` at startup. Copy `.env.example` and fill in yo
 - **More data sources** — INE (National Statistics Institute), municipal transparency portals, Contratación del Estado
 - **Session memory** — SQLite cache so repeated queries don't re-fetch the same documents
 - **Simple web UI** — a minimal interface to submit queries and browse reports without touching the terminal
+- **search_boe: actualmente busca solo en los últimos 3 días** — pendiente: integrar el buscador histórico del BOE o usar su endpoint SPARQL cuando esté disponible

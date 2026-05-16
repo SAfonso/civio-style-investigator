@@ -169,27 +169,55 @@ def _dispatch_tool(name: str, inputs: dict):
     return {"error": f"Tool desconocida: {name}"}
 
 
+def _collect_urls(tool_name: str, tool_args: dict, result: dict) -> list[str]:
+    """Extrae las URLs consultadas de los argumentos y resultados de una tool."""
+    urls = []
+    if tool_name == "fetch_document":
+        url = tool_args.get("url", "")
+        if url:
+            urls.append(url)
+    elif tool_name in ("search_datasets", "search_boe"):
+        for item in result.get("results", []):
+            if isinstance(item, dict) and item.get("url"):
+                urls.append(item["url"])
+    return urls
+
+
+def _auto_report(question: str, summary: str, consulted_urls: list[str], limitation: str) -> str:
+    """Llama a write_report con los datos mínimos disponibles y devuelve el path."""
+    result = write_report({
+        "question": question,
+        "summary": summary,
+        "findings": [],
+        "limitations": [limitation],
+        "sources": consulted_urls,
+    })
+    return result.get("path", "")
+
+
 def run(question: str) -> dict:
     """
     Ejecuta el loop principal del agente investigador (ciclo ReAct).
 
     Envía la pregunta al modelo con las tools disponibles y repite el ciclo
     Reason → Act → Observe hasta que el agente llame a write_report, responda
-    con texto puro o se agoten las iteraciones permitidas.
+    con texto puro o se agoten las iteraciones permitidas. En los dos últimos
+    casos genera automáticamente un informe con los datos recopilados.
 
     Args:
         question: Pregunta de investigación en lenguaje natural.
 
     Returns:
         Dict con las claves:
-          - status (str):      "completed" | "max_iterations_reached"
-          - iterations (int):  número de iteraciones consumidas
-          - path (str | None): ruta del informe generado, o None si no se generó
+          - status (str):  "completed" | "text_response" | "max_iterations_reached"
+          - iterations (int): número de iteraciones consumidas
+          - path (str):    ruta del informe generado (siempre presente)
     """
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     messages = [types.Content(role="user", parts=[types.Part(text=question)])]
     report_path = None
     write_report_called = False
+    consulted_urls: list[str] = []
 
     for iteration in range(_MAX_ITERATIONS):
         logger.info("Iteración %d/%d", iteration + 1, _MAX_ITERATIONS)
@@ -216,8 +244,24 @@ def run(question: str) -> dict:
         ]
 
         if not function_call_parts:
-            logger.info("Agente terminó sin function_call en iteración %d", iteration + 1)
-            break
+            text_parts = [part.text for part in model_content.parts if part.text]
+            agent_text = "\n".join(text_parts).strip()
+
+            logger.info(
+                "Agente terminó con respuesta de texto — generando informe automático"
+            )
+            report_path = _auto_report(
+                question=question,
+                summary=agent_text or "El agente no encontró información suficiente.",
+                consulted_urls=consulted_urls,
+                limitation="El agente no encontró datos suficientes en las fuentes consultadas",
+            )
+            logger.info("Informe automático generado: %s", report_path)
+            return {
+                "status": "text_response",
+                "path": report_path,
+                "iterations": iteration + 1,
+            }
 
         response_parts = []
         for part in function_call_parts:
@@ -231,6 +275,7 @@ def run(question: str) -> dict:
             )
 
             result = _dispatch_tool(tool_name, tool_args)
+            consulted_urls.extend(_collect_urls(tool_name, tool_args, result))
 
             if tool_name == "write_report":
                 write_report_called = True
@@ -255,13 +300,23 @@ def run(question: str) -> dict:
 
     else:
         logger.warning(
-            "Límite de iteraciones alcanzado (%d). La investigación no generó informe.",
+            "Límite de iteraciones alcanzado (%d) — generando informe automático.",
             _MAX_ITERATIONS,
         )
+        report_path = _auto_report(
+            question=question,
+            summary="La investigación alcanzó el límite máximo de iteraciones sin completarse.",
+            consulted_urls=consulted_urls,
+            limitation=(
+                f"La investigación alcanzó el límite de {_MAX_ITERATIONS} iteraciones "
+                "sin completarse."
+            ),
+        )
+        logger.info("Informe automático generado: %s", report_path)
         return {
             "status": "max_iterations_reached",
+            "path": report_path,
             "iterations": _MAX_ITERATIONS,
-            "path": None,
         }
 
     logger.info("Status: completed | iteraciones usadas: %d", iteration + 1)
